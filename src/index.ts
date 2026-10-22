@@ -34,6 +34,17 @@ export function referencesSecretVar(input: unknown): boolean {
   return SECRET_VAR_RE.test(text)
 }
 
+// Detects a *quoted* identifier whose name contains a secret-ish word, e.g.
+// `grep "API_KEY" src/`. The output of such a command is searched text that
+// may contain real assignments, so we never destroy it wholesale — we only
+// append the guidance note and rely on the value patterns below.
+const SECRET_NAME_RE = /["'][^"']*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[^"']*["']/i
+
+export function referencesSecretName(input: unknown): boolean {
+  const text = typeof input === "string" ? input : JSON.stringify(input ?? "")
+  return SECRET_NAME_RE.test(text)
+}
+
 export const NOTE =
   "\n\n[redactor] A credential or secret-named variable was involved. If you need to check or use an env var, key, or token, do not print its content - verify it is not null and use it directly."
 
@@ -113,10 +124,38 @@ export default Plugin.define({
         }
       }
 
-      // Append guidance when a secret was redacted OR the command referenced a
-      // secret-named variable (KEY/TOKEN/SECRET/…) even if nothing matched.
+      // Guidance + (when safe) full redaction for secret-named variables.
       const inputRefsSecret = referencesSecretVar(event.input)
-      if (changed || inputRefsSecret) {
+      const inputRefsName = referencesSecretName(event.input)
+      const triggered = inputRefsSecret || inputRefsName
+
+      // When a command references a secret-named variable (e.g. `echo $DB_PASSWORD`),
+      // its output IS the secret. Redact the whole output so the value cannot leak,
+      // but only when the output is short (a printed value) — multi-line output
+      // such as `grep` results is preserved and handled by the patterns above.
+      const contentText =
+        typeof result.content === "string"
+          ? result.content
+          : Array.isArray(result.content)
+            ? (result.content as MutableContentPart[])
+                .map((p) => (p && p.type === "text" && typeof p.text === "string" ? p.text : ""))
+                .join("\n")
+            : ""
+      const outputText = typeof result.output === "string" ? result.output : ""
+      const combined = (contentText + "\n" + outputText).trim()
+      const shortOutput = combined.length > 0 && combined.length <= 300
+
+      if (inputRefsSecret && shortOutput) {
+        const marker = "[REDACTED:env_var_leak]"
+        if (typeof result.content === "string") result.content = marker + NOTE
+        else if (Array.isArray(result.content)) {
+          result.content = [{ type: "text", text: marker + NOTE }]
+        }
+        if (typeof result.output === "string") result.output = marker + NOTE
+        changed = true
+        types.add("env_var_leak")
+        report(event.tool, [...types])
+      } else if (changed || triggered) {
         if (typeof result.content === "string") result.content = appendNote(result.content)
         else if (Array.isArray(result.content)) {
           const parts = result.content as MutableContentPart[]

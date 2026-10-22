@@ -52,12 +52,18 @@ different command than it actually ran.
 | Generic | `api_key=…`, `"client_secret": "…"`, `FOO_TOKEN=…`, PEM private key blocks, JWTs |
 
 Matches are replaced with `[REDACTED:{type}]`, so the model can still see that *a* credential was
-there and which kind it was.
+there and which kind it was. Assignment-style matches with a short value (e.g. `DB_PASSWORD=ab12`)
+are also caught when the key name itself says "secret"/"token"/"password"/….
 
-When a tool result is redacted — or the command itself references a variable whose name contains
-`KEY`/`TOKEN`/`SECRET`/`PASSWORD` (e.g. `echo $API_KEY`) — REDACTOR also appends a short note
-telling the model not to print the value and to verify it is non-null before use. Tool inputs are
-still never rewritten.
+When a command references a secret-named variable (`echo $API_KEY`, `process.env.TOKEN`, …) the
+tool output is treated as the secret itself: short outputs are fully replaced with
+`[REDACTED:env_var_leak]`, longer ones keep their text but carry the note below. Tool inputs are
+still never rewritten. Commands that *search* for a secret name (`grep "API_KEY" src/`) are not
+destroyed — their output is scanned line by line and any assignment value is redacted, plus a
+guidance note is appended.
+
+Matches are also followed by a short note telling the model not to print the value and to verify it
+is non-null before use.
 
 **Precision over recall:** obvious placeholders (`your-api-key-here`, `sk-EXAMPLE…`, `changeme`,
 `xxx`) are left untouched, and generic assignment matching needs a long enough value to fire.

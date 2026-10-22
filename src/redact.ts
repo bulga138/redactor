@@ -152,6 +152,18 @@ const PATTERNS: Pattern[] = [
   { type: "facebook_token", mode: "whole", regex: /\bEAA[0-9A-Za-z]{90,}\b/g },
   { type: "twitter_token", mode: "whole", regex: /\bA{22}[0-9A-Za-z%]{80,}\b/g },
 
+  // Strong-named keys with a low value floor: when the key name itself says
+  // "password"/"secret"/"token"/…, even a short value is a credential. The
+  // generic pattern above keeps a 12-char floor to avoid false positives on
+  // things like `key=true`; this one is stricter about the name and looser
+  // about the value.
+  {
+    type: "named_secret",
+    mode: "prefix",
+    regex:
+      /\b([A-Za-z0-9_.-]*(?:api[_-]?key|access[_-]?key|secret[_-]?key|client[_-]?secret|private[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|api[_-]?token|password|passwd|pwd|credential|apikey|api[_-]?secret)[A-Za-z0-9_.-]*["']?\s*[=:]\s*)["']?([^\s"',;]{4,})["']?/gi,
+  },
+
   // Transport auth
   {
     type: "bearer_token",

@@ -102,6 +102,13 @@ describe("false positives", () => {
     expect(r.count).toBe(0)
     expect(r.output).toContain(KEY)
   })
+
+  test("named_secret catches short values on secret-named keys", () => {
+    const r = redact('DB_PASSWORD=ab12')
+    expect(r.count).toBe(1)
+    expect(r.output).not.toContain("ab12")
+    expect(r.output).toContain("[REDACTED:named_secret]")
+  })
 })
 
 describe("behaviour", () => {

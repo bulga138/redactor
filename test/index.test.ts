@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { appendNote, referencesSecretVar } from "../src/index.js"
+import { appendNote, referencesSecretName, referencesSecretVar } from "../src/index.js"
 
 describe("referencesSecretVar", () => {
   test("detects $VAR references", () => {
@@ -13,6 +13,16 @@ describe("referencesSecretVar", () => {
     expect(referencesSecretVar("echo $HOME")).toBe(false)
     expect(referencesSecretVar("grep API_KEY src/")).toBe(false)
     expect(referencesSecretVar("const x = 1")).toBe(false)
+  })
+
+  test("referencesSecretName detects quoted secret identifiers", () => {
+    expect(referencesSecretName('grep "API_KEY" src/')).toBe(true)
+    expect(referencesSecretName("grep 'DB_PASSWORD' .")).toBe(true)
+    expect(referencesSecretName('search "token"')).toBe(true)
+  })
+  test("referencesSecretName ignores plain words", () => {
+    expect(referencesSecretName("grep hello src/")).toBe(false)
+    expect(referencesSecretName("echo done")).toBe(false)
   })
 })
 
