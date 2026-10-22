@@ -31,6 +31,23 @@ describe("referencesSecretVar", () => {
     expect(secretVarNames('grep "API_KEY" src/')).toEqual(["API_KEY"])
     expect(secretVarNames("echo $HOME")).toEqual([])
   })
+
+  // Regression: the input arrives as an object { command: "..." }. Stringifying
+  // the whole object wraps the command in outer quotes, which made the regexes
+  // match secret-ish words inside unquoted paths (e.g. "token-accumulator").
+  test("ignores secret-ish words inside unquoted paths", () => {
+    const input = {
+      command:
+        "cd C:\\Users\\bulga\\Documents\\programacion\\token-accumulator-counter-opencode; git log -1 --oneline; echo '---STATUS---'; git status --short --branch",
+    }
+    expect(referencesSecretName(input)).toBe(false)
+    expect(referencesSecretVar(input)).toBe(false)
+    expect(secretVarNames(input)).toEqual([])
+  })
+  test("still detects quoted secret identifiers in object input", () => {
+    expect(referencesSecretName({ command: 'grep "API_KEY" src/' })).toBe(true)
+    expect(secretVarNames({ command: 'grep "API_KEY" src/' })).toEqual(["API_KEY"])
+  })
 })
 
 describe("appendNote", () => {
