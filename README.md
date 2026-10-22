@@ -43,10 +43,11 @@ different command than it actually ran.
 
 | Family | Examples |
 | --- | --- |
-| Cloud | `AKIA…`/`ASIA…`, `aws_secret_access_key=…`, Azure `AccountKey=…` |
-| Model providers | `sk-…`, `sk-proj-…`, `sk-or-v1-…` (OpenRouter), `AIza…` (Gemini), `GOCSPX-…` |
-| VCS | `ghp_`/`gho_`/`ghs_`/`ghr_`/`github_pat_…`, `glpat-…` |
-| SaaS | Slack `xox…`, Stripe `sk_live_…`, npm `npm_…`, HuggingFace `hf_…`, Twilio, Telegram bot tokens, Sentry DSN, Discord webhooks |
+| Cloud | `AKIA…`/`ASIA…`, `aws_secret_access_key=…`, Azure `AccountKey=…`, DigitalOcean `dop_v1_…`, Vercel `vcp_…`, Netlify `nfp_…`, Fly.io `fm2_…`, HashiCorp Vault `hvs.`/`hvb.`, Terraform `…atlasv1.`, Doppler `dp.pt.`, Pulumi `pul-`, Databricks `dapi…`, age keys |
+| Model providers | `sk-…`, `sk-proj-…`, `sk-or-v1-…` (OpenRouter), `AIza…` (Gemini), `GOCSPX-…`, Groq `gsk_…`, xAI `xai-…`, Perplexity `pplx-…`, Replicate `r8_…`, Google OAuth `ya29.`, DeepSeek/Mistral/Cohere (via generic assignment) |
+| VCS | `ghp_`/`gho_`/`ghs_`/`ghr_`/`github_pat_…`, `glpat-…`, Docker Hub `dckr_pat_…`, CircleCI `CCIPAT_…`/`CCIPRJ_…` |
+| SaaS | Slack `xox…`/`xapp-`, Stripe `sk_live_…`/`whsec_…`, npm `npm_…`, HuggingFace `hf_…`, Twilio, Telegram, Sentry DSN, Discord webhooks, Grafana `glsa_…`/`glc_…`, Notion `ntn_…`, Airtable `pat…`, Postman `PMAK-…`, Atlassian `ATATT3…`, Mailchimp `…-us12`, SendGrid `SG.…`, Shopify `shpat_…`, Square `sq0atp-…`/`EAAA…`, Braintree, Facebook `EAA…`, Twitter/X `A{22}…` |
+| Registries | PyPI `pypi-AgEI…`, RubyGems `rubygems_…` |
 | Transport | `Authorization: Bearer …`, `postgres://user:pass@…`, `https://user:pass@…` |
 | Generic | `api_key=…`, `"client_secret": "…"`, `FOO_TOKEN=…`, PEM private key blocks, JWTs |
 
@@ -84,6 +85,15 @@ wins):
 - A secret already in the model's context stays there (start a new session to drop it).
 - Tool inputs are not rewritten (see above).
 - A secret split across two tool calls is not detected — this is not a DLP product.
+
+## Sources
+
+Pattern coverage was informed by the MIT-licensed community sets
+[odomojuli/regextokens](https://github.com/odomojuli/regextokens) and
+[Rkcr7/GitSentry](https://github.com/Rkcr7/GitSentry). The regexes here are written by us, not
+copied. [mazen160/secrets-patterns-db](https://github.com/mazen160/secrets-patterns-db) (CC-BY-SA-4.0)
+was consulted for reference only — none of its data is embedded in this plugin, because embedding
+it would force the plugin itself to be ShareAlike.
 
 ## License
 

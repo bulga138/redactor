@@ -117,3 +117,60 @@ describe("behaviour", () => {
     expect(containsSecrets("nothing here")).toBe(false)
   })
 })
+
+// Formats mined from MIT-licensed community pattern sets (regextokens, GitSentry).
+// Each sample is the bare token: no assignment context, so only the provider
+// pattern can fire and the count stays 1.
+describe("mined provider patterns", () => {
+  const CASES: Array<[string, string]> = [
+    ["digitalocean_pat", "dop_v1_" + "a1".repeat(32)],
+    ["vercel_token", "vcp_" + "V".repeat(24)],
+    ["netlify_token", "nfp_" + "b2".repeat(18)],
+    ["fly_token", "fm2_" + "c3".repeat(20)],
+    ["vault_token", "hvs." + "d4".repeat(12)],
+    ["terraform_token", "e5".repeat(7) + ".atlasv1." + "f6".repeat(31)],
+    ["doppler_token", "dp.pt." + "g7".repeat(21) + "x"],
+    ["pulumi_token", "pul-" + "a1".repeat(20)],
+    ["databricks_token", "dapi" + "a1".repeat(16)],
+    ["age_secret_key", "AGE-SECRET-KEY-1" + "QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L".repeat(2).slice(0, 58)],
+    ["groq_key", "gsk_" + "j1".repeat(16)],
+    ["xai_key", "xai-" + "k2".repeat(30)],
+    ["perplexity_key", "pplx-" + "l3".repeat(16)],
+    ["replicate_token", "r8_" + "m4".repeat(18)],
+    ["google_oauth_token", "ya29." + "n5".repeat(15)],
+    ["docker_token", "dckr_pat_" + "o6".repeat(15)],
+    ["circleci_token", "CCIPAT_" + "p7".repeat(10) + "_" + "a8".repeat(20)],
+    ["pypi_token", "pypi-AgEIcHlwaS5vcmc" + "r9".repeat(25)],
+    ["rubygems_token", "rubygems_" + "b1".repeat(24)],
+    ["grafana_token", "glsa_" + "c2".repeat(16) + "_" + "d3".repeat(4)],
+    ["grafana_cloud_token", "glc_" + "e4".repeat(20)],
+    ["notion_token", "ntn_" + "f5".repeat(20)],
+    ["airtable_token", "pat" + "g6".repeat(7) + "." + "a7".repeat(32)],
+    ["postman_token", "PMAK-" + "b8".repeat(12) + "-" + "c9".repeat(17)],
+    ["atlassian_token", "ATATT3" + "x7Kq2mZ9pL4tR8vW3yN6cH1sD5gJ0fB7kQ2xM9nV4".repeat(3)],
+    ["mailchimp_key", "d4".repeat(16) + "-us12"],
+    ["sendgrid_key", "SG." + "e5".repeat(11) + "." + "f6".repeat(21) + "f"],
+    ["stripe_webhook_secret", "whsec_" + "a7".repeat(16)],
+    ["shopify_token", "shpat_" + "b8".repeat(16)],
+    ["square_token", "sq0atp-" + "c9".repeat(11)],
+    ["square_access_token", "EAAA" + "d1".repeat(30)],
+    ["braintree_token", "access_token$production$" + "e2".repeat(8) + "$" + "a3".repeat(16)],
+    ["facebook_token", "EAA" + "x7".repeat(45)],
+    ["twitter_token", "A".repeat(22) + "b1".repeat(40)],
+    ["slack_token", "xapp-1-A01234567890-1234567890123-abcdef"],
+  ]
+
+  for (const [type, secret] of CASES) {
+    test(type, () => {
+      const r = redact(secret)
+      expect(r.count).toBe(1)
+      expect(r.output).not.toContain(secret)
+      expect(r.output).toContain(`[REDACTED:${type}]`)
+    })
+  }
+
+  test("benign text is untouched", () => {
+    const text = 'const greeting = "hello world"; // 1234567890\nconst url = "https://example.com/docs"'
+    expect(redact(text).count).toBe(0)
+  })
+})
