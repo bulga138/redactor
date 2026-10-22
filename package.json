@@ -1,6 +1,6 @@
 {
   "name": "@bulga138/redactor",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Keeps credentials out of your model's context — OpenCode V2 plugin",
   "type": "module",
   "main": "dist/index.js",

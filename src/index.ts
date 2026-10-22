@@ -22,6 +22,25 @@ interface MutableContentPart {
   result?: { type?: string; value?: unknown }
 }
 
+// Detects a reference to an env var / key / token whose *name* contains a
+// secret-ish word (KEY, TOKEN, SECRET, PASSWORD, …). Used to guard outputs
+// that echo such a variable even when the value itself has no recognisable
+// format (e.g. `echo $API_KEY` printing an arbitrary password).
+const SECRET_VAR_RE =
+  /\$(?:\{)?[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*(?:\})?|process\.env(?:\[['"]?[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*['"]?\]|\.[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*)|os\.(?:getenv|environ(?:\.get)?)\(\s*['"][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*['"]\s*\)|\bgetenv\s*\(\s*['"][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*['"]\s*\)/i
+
+export function referencesSecretVar(input: unknown): boolean {
+  const text = typeof input === "string" ? input : JSON.stringify(input ?? "")
+  return SECRET_VAR_RE.test(text)
+}
+
+export const NOTE =
+  "\n\n[redactor] A credential or secret-named variable was involved. If you need to check or use an env var, key, or token, do not print its content - verify it is not null and use it directly."
+
+export function appendNote(text: string): string {
+  return text.includes("[redactor]") ? text : text + NOTE
+}
+
 export default Plugin.define({
   id: "redactor",
   async setup(ctx) {
@@ -47,6 +66,9 @@ export default Plugin.define({
           if (r.count) {
             err.message = r.output
             report(event.tool, r.types)
+          }
+          if (r.count || referencesSecretVar(event.input)) {
+            err.message = appendNote(err.message)
           }
         }
         return
@@ -91,7 +113,24 @@ export default Plugin.define({
         }
       }
 
-      if (changed) report(event.tool, [...types])
+      // Append guidance when a secret was redacted OR the command referenced a
+      // secret-named variable (KEY/TOKEN/SECRET/…) even if nothing matched.
+      const inputRefsSecret = referencesSecretVar(event.input)
+      if (changed || inputRefsSecret) {
+        if (typeof result.content === "string") result.content = appendNote(result.content)
+        else if (Array.isArray(result.content)) {
+          const parts = result.content as MutableContentPart[]
+          const last = parts.length ? parts[parts.length - 1] : null
+          if (last && last.type === "text" && typeof last.text === "string") {
+            last.text = appendNote(last.text)
+          } else {
+            parts.push({ type: "text", text: NOTE.trim() })
+          }
+        }
+        if (typeof result.output === "string") result.output = appendNote(result.output)
+        if (changed) report(event.tool, [...types])
+        else report(event.tool, ["env_var_reference"])
+      }
     })
 
     const contextHook = await ctx.session.hook("context", async (event) => {
@@ -103,7 +142,7 @@ export default Plugin.define({
 
           if (typeof value === "string") {
             const r = redact(value, { allow })
-            if (r.count) part.result = { ...part.result, value: r.output }
+            if (r.count) part.result = { ...part.result, value: appendNote(r.output) }
             continue
           }
 
@@ -115,7 +154,7 @@ export default Plugin.define({
                 const r = redact(c.text, { allow })
                 if (r.count) {
                   touched = true
-                  return { ...c, text: r.output }
+                  return { ...c, text: appendNote(r.output) }
                 }
               }
               return item
