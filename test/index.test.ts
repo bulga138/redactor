@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { appendNote, referencesSecretName, referencesSecretVar } from "../src/index.js"
+import { appendNote, referencesSecretName, referencesSecretVar, secretVarNames } from "../src/index.js"
 
 describe("referencesSecretVar", () => {
   test("detects $VAR references", () => {
@@ -23,6 +23,13 @@ describe("referencesSecretVar", () => {
   test("referencesSecretName ignores plain words", () => {
     expect(referencesSecretName("grep hello src/")).toBe(false)
     expect(referencesSecretName("echo done")).toBe(false)
+  })
+
+  test("secretVarNames extracts variable names", () => {
+    expect(secretVarNames("echo $DB_PASSWORD")).toEqual(["DB_PASSWORD"])
+    expect(secretVarNames('os.getenv("API_KEY")')).toEqual(["API_KEY"])
+    expect(secretVarNames('grep "API_KEY" src/')).toEqual(["API_KEY"])
+    expect(secretVarNames("echo $HOME")).toEqual([])
   })
 })
 

@@ -1,6 +1,6 @@
 {
   "name": "@bulga138/redactor",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Keeps credentials out of your model's context — OpenCode V2 plugin",
   "type": "module",
   "main": "dist/index.js",
@@ -37,7 +37,7 @@
     "url": "https://github.com/bulga138/redactor/issues"
   },
   "dependencies": {
-    "@opencode/plugin": "^2.1.2"
+    "@opencode/plugin": "2.1.2"
   },
   "devDependencies": {
     "@types/node": "22.19.0",

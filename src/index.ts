@@ -34,6 +34,31 @@ export function referencesSecretVar(input: unknown): boolean {
   return SECRET_VAR_RE.test(text)
 }
 
+// Extract the names of secret-named variables referenced in `input`, so the
+// redacted marker can name them (the *name* is not a secret, only the value is).
+export function secretVarNames(input: unknown): string[] {
+  const text = typeof input === "string" ? input : JSON.stringify(input ?? "")
+  const out = new Set<string>()
+  const patterns: RegExp[] = [
+    /\$\{?([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*)\}?/gi,
+    /process\.env(?:\[['"]?([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*)['"]?\]|\.[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*)/gi,
+    /os\.(?:getenv|environ(?:\.get)?)\(\s*['"]([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*)['"]\s*\)/gi,
+    /\bgetenv\s*\(\s*['"]([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*)['"]\s*\)/gi,
+  ]
+  for (const re of patterns) {
+    re.lastIndex = 0
+    for (const m of text.matchAll(re)) {
+      const name = (m[1] ?? m[0]).replace(/^\$/, "").replace(/[{}]/g, "")
+      if (name) out.add(name.toUpperCase())
+    }
+  }
+  // Quoted identifier form (e.g. grep "API_KEY"): capture the whole quoted term.
+  for (const m of text.matchAll(/["']([A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Za-z0-9_]*)["']/gi)) {
+    out.add(m[1].toUpperCase())
+  }
+  return [...out]
+}
+
 // Detects a *quoted* identifier whose name contains a secret-ish word, e.g.
 // `grep "API_KEY" src/`. The output of such a command is searched text that
 // may contain real assignments, so we never destroy it wholesale — we only
@@ -48,8 +73,8 @@ export function referencesSecretName(input: unknown): boolean {
 export const NOTE =
   "\n\n[redactor] A credential or secret-named variable was involved. If you need to check or use an env var, key, or token, do not print its content - verify it is not null and use it directly."
 
-export function appendNote(text: string): string {
-  return text.includes("[redactor]") ? text : text + NOTE
+export function appendNote(text: string, note: string = NOTE): string {
+  return text.includes("[redactor]") ? text : text + note
 }
 
 export default Plugin.define({
@@ -78,8 +103,12 @@ export default Plugin.define({
             err.message = r.output
             report(event.tool, r.types)
           }
-          if (r.count || referencesSecretVar(event.input)) {
-            err.message = appendNote(err.message)
+          if (r.count || referencesSecretVar(event.input) || referencesSecretName(event.input)) {
+            const names = secretVarNames(event.input)
+            const noteText = names.length
+              ? `\\n\\n[redactor] Secret-named variable(s) involved: ${names.join(", ")}. Do not print their values - verify they are non-null and use them directly.`
+              : NOTE
+            err.message = appendNote(err.message, noteText)
           }
         }
         return
@@ -146,27 +175,36 @@ export default Plugin.define({
       const shortOutput = combined.length > 0 && combined.length <= 300
 
       if (inputRefsSecret && shortOutput) {
-        const marker = "[REDACTED:env_var_leak]"
-        if (typeof result.content === "string") result.content = marker + NOTE
+        const names = secretVarNames(event.input)
+        const label = names.length ? `env_var_leak:${names.join(",")}` : "env_var_leak"
+        const marker = `[REDACTED:${label}]`
+        const note = names.length
+          ? `\\n\\n[redactor] Secret-named variable(s) involved: ${names.join(", ")}. Do not print their values — verify they are non-null and use them directly.`
+          : NOTE
+        if (typeof result.content === "string") result.content = marker + note
         else if (Array.isArray(result.content)) {
-          result.content = [{ type: "text", text: marker + NOTE }]
+          result.content = [{ type: "text", text: marker + note }]
         }
-        if (typeof result.output === "string") result.output = marker + NOTE
+        if (typeof result.output === "string") result.output = marker + note
         changed = true
         types.add("env_var_leak")
         report(event.tool, [...types])
       } else if (changed || triggered) {
-        if (typeof result.content === "string") result.content = appendNote(result.content)
+        const names = secretVarNames(event.input)
+        const noteText = names.length
+          ? `\\n\\n[redactor] Secret-named variable(s) involved: ${names.join(", ")}. Do not print their values - verify they are non-null and use them directly.`
+          : NOTE
+        if (typeof result.content === "string") result.content = appendNote(result.content, noteText)
         else if (Array.isArray(result.content)) {
           const parts = result.content as MutableContentPart[]
           const last = parts.length ? parts[parts.length - 1] : null
           if (last && last.type === "text" && typeof last.text === "string") {
-            last.text = appendNote(last.text)
+            last.text = appendNote(last.text, noteText)
           } else {
-            parts.push({ type: "text", text: NOTE.trim() })
+            parts.push({ type: "text", text: noteText.trim() })
           }
         }
-        if (typeof result.output === "string") result.output = appendNote(result.output)
+        if (typeof result.output === "string") result.output = appendNote(result.output, noteText)
         if (changed) report(event.tool, [...types])
         else report(event.tool, ["env_var_reference"])
       }
