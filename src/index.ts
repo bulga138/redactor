@@ -30,14 +30,14 @@ const SECRET_VAR_RE =
   /\$(?:\{)?[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*(?:\})?|process\.env(?:\[['"]?[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*['"]?\]|\.[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*)|os\.(?:getenv|environ(?:\.get)?)\(\s*['"][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*['"]\s*\)|\bgetenv\s*\(\s*['"][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*['"]\s*\)/i
 
 export function referencesSecretVar(input: unknown): boolean {
-  const text = typeof input === "string" ? input : JSON.stringify(input ?? "")
+  const text = typeof input === "string" ? input : (input && typeof input === "object" && "command" in input) ? String((input as { command: unknown }).command ?? "") : JSON.stringify(input ?? "")
   return SECRET_VAR_RE.test(text)
 }
 
 // Extract the names of secret-named variables referenced in `input`, so the
 // redacted marker can name them (the *name* is not a secret, only the value is).
 export function secretVarNames(input: unknown): string[] {
-  const text = typeof input === "string" ? input : JSON.stringify(input ?? "")
+  const text = typeof input === "string" ? input : (input && typeof input === "object" && "command" in input) ? String((input as { command: unknown }).command ?? "") : JSON.stringify(input ?? "")
   const out = new Set<string>()
   const patterns: RegExp[] = [
     /\$\{?([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*)\}?/gi,
@@ -66,7 +66,13 @@ export function secretVarNames(input: unknown): string[] {
 const SECRET_NAME_RE = /["'][^"']*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[^"']*["']/i
 
 export function referencesSecretName(input: unknown): boolean {
-  const text = typeof input === "string" ? input : JSON.stringify(input ?? "")
+  // Extract the command string rather than stringifying the whole input object.
+  // Stringifying wraps the command in outer quotes, which makes the regex
+  // match substrings like "token-accumulator-..." in unquoted paths.
+  let text = ""
+  if (typeof input === "string") text = input
+  else if (input && typeof input === "object" && "command" in input) text = String((input as { command: unknown }).command ?? "")
+  else text = JSON.stringify(input ?? "")
   return SECRET_NAME_RE.test(text)
 }
 
@@ -106,7 +112,7 @@ export default Plugin.define({
           if (r.count || referencesSecretVar(event.input) || referencesSecretName(event.input)) {
             const names = secretVarNames(event.input)
             const noteText = names.length
-              ? `\\n\\n[redactor] Secret-named variable(s) involved: ${names.join(", ")}. Do not print their values - verify they are non-null and use them directly.`
+              ? `\n\n[redactor] Secret-named variable(s) involved: ${names.join(", ")}. Do not print their values - verify they are non-null and use them directly.`
               : NOTE
             err.message = appendNote(err.message, noteText)
           }
@@ -179,7 +185,7 @@ export default Plugin.define({
         const label = names.length ? `env_var_leak:${names.join(",")}` : "env_var_leak"
         const marker = `[REDACTED:${label}]`
         const note = names.length
-          ? `\\n\\n[redactor] Secret-named variable(s) involved: ${names.join(", ")}. Do not print their values — verify they are non-null and use them directly.`
+          ? `\n\n[redactor] Secret-named variable(s) involved: ${names.join(", ")}. Do not print their values - verify they are non-null and use them directly.`
           : NOTE
         if (typeof result.content === "string") result.content = marker + note
         else if (Array.isArray(result.content)) {
@@ -192,7 +198,7 @@ export default Plugin.define({
       } else if (changed || triggered) {
         const names = secretVarNames(event.input)
         const noteText = names.length
-          ? `\\n\\n[redactor] Secret-named variable(s) involved: ${names.join(", ")}. Do not print their values - verify they are non-null and use them directly.`
+          ? `\n\n[redactor] Secret-named variable(s) involved: ${names.join(", ")}. Do not print their values - verify they are non-null and use them directly.`
           : NOTE
         if (typeof result.content === "string") result.content = appendNote(result.content, noteText)
         else if (Array.isArray(result.content)) {
