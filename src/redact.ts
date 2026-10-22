@@ -1,0 +1,173 @@
+/**
+ * REDACTOR secret redaction
+ *
+ * Replaces credential-shaped text with [REDACTED:{type}] so the surrounding
+ * context survives but the secret does not.
+ *
+ * The pattern set is deliberately high-precision: a secret that is not redacted
+ * leaks, but a false positive corrupts output the model needs. Generic
+ * assignment matching therefore requires a long enough value, and obvious
+ * placeholders ("your-key-here", "changeme") are left alone.
+ *
+ * Pattern group convention:
+ *   'whole'   — the whole match is the secret.
+ *   'prefix'  — group 1 is kept, group 2 is the secret, group 3 (optional) is kept.
+ */
+
+export interface RedactionResult {
+  output: string;
+  count: number;
+  types: string[];
+}
+
+export interface RedactOptions {
+  /** Literal values that must survive redaction (e.g. a test key you use). */
+  allow?: string[];
+}
+
+type Mode = "whole" | "prefix";
+
+interface Pattern {
+  type: string;
+  regex: RegExp;
+  mode: Mode;
+}
+
+const PATTERNS: Pattern[] = [
+  // PEM private key blocks — before everything else, they contain other patterns
+  {
+    type: "pem_key",
+    mode: "whole",
+    regex: /-----BEGIN (?:[A-Z ]*)?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]*)?PRIVATE KEY-----/g,
+  },
+  // JWT — three base64url segments
+  { type: "jwt", mode: "whole", regex: /\beyJ[A-Za-z0-9\-_]+\.eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\b/g },
+
+  // Cloud / infra
+  { type: "aws_access_key", mode: "whole", regex: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g },
+  {
+    type: "aws_secret_key",
+    mode: "prefix",
+    regex: /((?:aws_secret_access_key|aws_session_token)["']?\s*[=:]\s*["']?)([A-Za-z0-9/+=]{40,})/gi,
+  },
+  { type: "azure_storage_key", mode: "prefix", regex: /(AccountKey=)([A-Za-z0-9+/=]{60,})/g },
+
+  // GitHub / GitLab
+  {
+    type: "github_token",
+    mode: "whole",
+    regex: /\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{20,255})\b/g,
+  },
+  { type: "gitlab_token", mode: "whole", regex: /\bglpat-[A-Za-z0-9\-_]{20,}\b/g },
+
+  // Model providers
+  { type: "sk_key", mode: "whole", regex: /\bsk-(?:ant-|proj-)?[A-Za-z0-9\-_]{20,}\b/g },
+  { type: "openrouter_key", mode: "whole", regex: /\bsk-or-v1-[A-Za-z0-9]{40,}\b/g },
+  { type: "gemini_key", mode: "whole", regex: /\bAIza[0-9A-Za-z\-_]{35}\b/g },
+  { type: "google_oauth_secret", mode: "whole", regex: /\bGOCSPX-[A-Za-z0-9\-_]{28}\b/g },
+
+  // SaaS
+  { type: "slack_token", mode: "whole", regex: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g },
+  { type: "stripe_key", mode: "whole", regex: /\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{10,}\b/g },
+  { type: "npm_token", mode: "whole", regex: /\bnpm_[A-Za-z0-9]{36}\b/g },
+  { type: "hf_token", mode: "whole", regex: /\bhf_[A-Za-z0-9]{34}\b/g },
+  { type: "twilio_key", mode: "whole", regex: /\b(?:SK|AC)[0-9a-fA-F]{32}\b/g },
+  { type: "telegram_bot_token", mode: "whole", regex: /\b\d{8,10}:[A-Za-z0-9\-_]{35}\b/g },
+  {
+    type: "sentry_dsn",
+    mode: "prefix",
+    regex: /(https:\/\/)([a-f0-9]{32})(@[a-z0-9.\-]+)/g,
+  },
+  {
+    type: "discord_webhook",
+    mode: "prefix",
+    regex: /(https:\/\/discord(?:app)?\.com\/api\/webhooks\/\d+\/)([A-Za-z0-9\-_]{30,})/g,
+  },
+
+  // Transport auth
+  {
+    type: "bearer_token",
+    mode: "prefix",
+    regex: /(Authorization:\s*Bearer\s+)([A-Za-z0-9\-_.~+/]+=*)/gi,
+  },
+  {
+    type: "url_credentials",
+    mode: "prefix",
+    regex: /((?:[a-z][a-z0-9+.\-]*:\/\/)[^\s:@/]+:)([^\s@/]+)(@[A-Za-z0-9.\-]+(?::\d+)?)/gi,
+  },
+
+  // Generic assignments: api_key = "…", token: …, "client_secret": "…"
+  // The key name may be prefixed (aws_access_key_id, MY_API_KEY, DB_PASSWORD),
+  // so the whole name is captured and kept — a leading \b would miss those
+  // because "_" is a word character.
+  {
+    type: "generic_secret",
+    mode: "prefix",
+    regex:
+      /\b([A-Za-z0-9_.-]*(?:api[_-]?key|access[_-]?key|secret[_-]?key|client[_-]?secret|private[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|api[_-]?token|secret|password|passwd|pwd|credential|token|apikey|api[_-]?secret)[A-Za-z0-9_.-]*["']?\s*[=:]\s*)["']?([^\s"',;]{12,})["']?/gi,
+  },
+  // Uppercase env assignments with a short value: FOO_TOKEN=abc123
+  {
+    type: "env_secret",
+    mode: "prefix",
+    regex:
+      /^([ \t]*[A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_KEY)[A-Z0-9_]*[ \t]*=[ \t]*)([^\s"'#]{6,})/gm,
+  },
+];
+
+// Values that are obviously not real credentials. The word-like markers must
+// stand alone: "AKIA…EXAMPLE" (AWS' documented key) still gets redacted.
+const PLACEHOLDER =
+  /(?:^|[^A-Za-z0-9])(?:example|placeholder|changeme|dummy|redacted)(?:[^A-Za-z0-9]|$)|your[_-]?\w+|x{3,}|\.{3,}|\*+|<[^>]+>|\{\{[^}]+\}\}/i;
+
+function isPlaceholder(value: string): boolean {
+  return PLACEHOLDER.test(value);
+}
+
+function isAllowed(value: string, allow: string[]): boolean {
+  return allow.some((a) => a.length > 0 && value.includes(a));
+}
+
+/**
+ * Redact secrets from a string.
+ * Returns the redacted string, the number of replacements and the types found.
+ */
+export function redact(input: string, opts: RedactOptions = {}): RedactionResult {
+  const allow = opts.allow ?? [];
+  let out = input;
+  let count = 0;
+  const types = new Set<string>();
+
+  for (const pattern of PATTERNS) {
+    pattern.regex.lastIndex = 0;
+    out = out.replace(pattern.regex, (...args: unknown[]) => {
+      const match = args[0] as string;
+      // Callback args: [match, ...groups, offset, wholeString]
+      const groups = args.slice(1, -2) as string[]
+
+      const secret = pattern.mode === "prefix" ? (groups[1] ?? match) : match;
+      const prefix = pattern.mode === "prefix" ? (groups[0] ?? "") : "";
+      const tail = pattern.mode === "prefix" ? (groups[2] ?? "") : "";
+
+      if (isAllowed(secret, allow)) return match;
+      if (isPlaceholder(secret)) return match;
+
+      types.add(pattern.type);
+      count++;
+      return `${prefix}[REDACTED:${pattern.type}]${tail}`;
+    });
+    pattern.regex.lastIndex = 0;
+  }
+
+  return { output: out, count, types: [...types] };
+}
+
+/** True when the text contains something that looks like a credential. */
+export function containsSecrets(input: string, opts: RedactOptions = {}): boolean {
+  return redact(input, opts).count > 0;
+}
+
+/** Pattern types this module can detect (for docs and diagnostics). */
+export function patternTypes(): string[] {
+  return PATTERNS.map((p) => p.type);
+}
