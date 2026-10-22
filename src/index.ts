@@ -12,14 +12,22 @@
  * Tool *inputs* are never rewritten: changing them would make the model believe
  * it ran a different command than it actually did.
  */
-import { Plugin } from "@opencode/plugin"
-import { redact } from "./redact.js"
-import { getConfig } from "./config.js"
+import { Plugin } from '@opencode/plugin'
+import { redact } from './redact.js'
+import { getConfig, type Config } from './config.js'
 
 interface MutableContentPart {
   type: string
   text?: string
   result?: { type?: string; value?: unknown }
+}
+
+/** The command a tool call runs, or the JSON of its input. */
+export function commandText(input: unknown): string {
+  if (typeof input === 'string') return input
+  if (input && typeof input === 'object' && 'command' in input)
+    return String((input as { command: unknown }).command ?? '')
+  return JSON.stringify(input ?? '')
 }
 
 // Detects a reference to an env var / key / token whose *name* contains a
@@ -30,14 +38,13 @@ const SECRET_VAR_RE =
   /\$(?:\{)?[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*(?:\})?|process\.env(?:\[['"]?[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*['"]?\]|\.[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*)|os\.(?:getenv|environ(?:\.get)?)\(\s*['"][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*['"]\s*\)|\bgetenv\s*\(\s*['"][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*['"]\s*\)/i
 
 export function referencesSecretVar(input: unknown): boolean {
-  const text = typeof input === "string" ? input : (input && typeof input === "object" && "command" in input) ? String((input as { command: unknown }).command ?? "") : JSON.stringify(input ?? "")
-  return SECRET_VAR_RE.test(text)
+  return SECRET_VAR_RE.test(commandText(input))
 }
 
 // Extract the names of secret-named variables referenced in `input`, so the
 // redacted marker can name them (the *name* is not a secret, only the value is).
 export function secretVarNames(input: unknown): string[] {
-  const text = typeof input === "string" ? input : (input && typeof input === "object" && "command" in input) ? String((input as { command: unknown }).command ?? "") : JSON.stringify(input ?? "")
+  const text = commandText(input)
   const out = new Set<string>()
   const patterns: RegExp[] = [
     /\$\{?([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*)\}?/gi,
@@ -48,12 +55,14 @@ export function secretVarNames(input: unknown): string[] {
   for (const re of patterns) {
     re.lastIndex = 0
     for (const m of text.matchAll(re)) {
-      const name = (m[1] ?? m[0]).replace(/^\$/, "").replace(/[{}]/g, "")
+      const name = (m[1] ?? m[0]).replace(/^\$/, '').replace(/[{}]/g, '')
       if (name) out.add(name.toUpperCase())
     }
   }
   // Quoted identifier form (e.g. grep "API_KEY"): capture the whole quoted term.
-  for (const m of text.matchAll(/["']([A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Za-z0-9_]*)["']/gi)) {
+  for (const m of text.matchAll(
+    /["']([A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Za-z0-9_]*)["']/gi
+  )) {
     out.add(m[1].toUpperCase())
   }
   return [...out]
@@ -69,41 +78,147 @@ export function referencesSecretName(input: unknown): boolean {
   // Extract the command string rather than stringifying the whole input object.
   // Stringifying wraps the command in outer quotes, which makes the regex
   // match substrings like "token-accumulator-..." in unquoted paths.
-  let text = ""
-  if (typeof input === "string") text = input
-  else if (input && typeof input === "object" && "command" in input) text = String((input as { command: unknown }).command ?? "")
-  else text = JSON.stringify(input ?? "")
-  return SECRET_NAME_RE.test(text)
+  return SECRET_NAME_RE.test(commandText(input))
+}
+
+// A command that reads a secret-bearing file hands the model the whole file,
+// in whatever encoding it asks for (base64, hex). Scanning the output is not
+// enough there, so the output of such a call is replaced as a whole.
+const READ_COMMANDS = new Set([
+  'cat',
+  'type',
+  'get-content',
+  'gc',
+  'more',
+  'less',
+  'bat',
+  'head',
+  'tail',
+  'nl',
+  'xxd',
+  'od',
+  'hexdump',
+  'base64',
+  'base32',
+  'openssl',
+  'strings',
+  'gzip',
+  'zcat',
+  'source',
+])
+
+function globToRegExp(pattern: string): RegExp {
+  const escaped = pattern
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*')
+    .replace(/\?/g, '.')
+  return new RegExp(`^${escaped}$`, 'i')
+}
+
+/** Base name of a path-ish token, without trailing punctuation. */
+function baseName(token: string): string {
+  const parts = token.split(/[\\/]/)
+  return (parts[parts.length - 1] ?? '').replace(/[.,;:]+$/, '')
+}
+
+/** Split a command into tokens, remembering which ones were quoted. */
+function tokenize(command: string): { text: string; quoted: boolean }[] {
+  const out: { text: string; quoted: boolean }[] = []
+  let cur = ''
+  let quote: string | undefined
+  const flush = (quoted: boolean) => {
+    if (cur) out.push({ text: cur, quoted })
+    cur = ''
+  }
+  for (const ch of command) {
+    if (quote) {
+      if (ch === quote) {
+        flush(true)
+        quote = undefined
+      } else cur += ch
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      flush(false)
+      quote = ch
+      continue
+    }
+    if (/\s/.test(ch)) {
+      flush(false)
+      continue
+    }
+    cur += ch
+  }
+  flush(false)
+  return out
+}
+
+/**
+ * Name of the secret-bearing file this tool call reads, if any.
+ * Only an unquoted path argument to a read command counts, so `rg ".env" src/`
+ * and `grep API_KEY .` keep their output.
+ */
+export function secretFileInInput(
+  tool: string,
+  input: unknown,
+  cfg: Pick<Config, 'redactSecretFiles' | 'secretPaths' | 'allowPaths'>
+): string | undefined {
+  if (!cfg.redactSecretFiles || cfg.secretPaths.length === 0) return undefined
+  const secretRe = cfg.secretPaths.map(globToRegExp)
+  const allowRe = cfg.allowPaths.map(globToRegExp)
+  const isSecret = (name: string) =>
+    name.length > 0 && !allowRe.some(re => re.test(name)) && secretRe.some(re => re.test(name))
+
+  // The read tool returns the file itself.
+  if (tool === 'read' && input && typeof input === 'object') {
+    const path = (input as { filePath?: unknown }).filePath
+    if (typeof path === 'string') {
+      const name = baseName(path)
+      if (isSecret(name)) return name
+    }
+  }
+
+  // A shell command that reads the file (cat .env, base64 .env, …).
+  const tokens = tokenize(commandText(input))
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i].quoted) continue
+    const name = baseName(tokens[i].text)
+    if (!isSecret(name)) continue
+    let j = i - 1
+    while (j >= 0 && tokens[j].text.startsWith('-')) j--
+    if (j >= 0 && READ_COMMANDS.has(tokens[j].text.toLowerCase())) return name
+  }
+  return undefined
 }
 
 export const NOTE =
-  "\n\n[redactor] A credential or secret-named variable was involved. If you need to check or use an env var, key, or token, do not print its content - verify it is not null and use it directly."
+  '\n\n[redactor] A credential or secret-named variable was involved. If you need to check or use an env var, key, or token, do not print its content - verify it is not null and use it directly.'
 
 export function appendNote(text: string, note: string = NOTE): string {
-  return text.includes("[redactor]") ? text : text + note
+  return text.includes('[redactor]') ? text : text + note
 }
 
 export default Plugin.define({
-  id: "redactor",
+  id: 'redactor',
   async setup(ctx) {
-    const cfg = getConfig()
+    const cfg = getConfig(ctx.options)
     if (!cfg.enabled) {
-      console.error("[redactor] disabled via config")
+      console.error('[redactor] disabled via config')
       return
     }
     const allow = cfg.allow
 
     const report = (tool: string, types: string[]) => {
-      if (cfg.log) console.error(`[redactor] ${tool}: ${types.join(", ")}`)
+      if (cfg.log) console.error(`[redactor] ${tool}: ${types.join(', ')}`)
     }
 
-    const toolHook = await ctx.tool.hook("execute.after", async (event) => {
+    const toolHook = await ctx.tool.hook('execute.after', async event => {
       if (cfg.skipTools.includes(event.tool)) return
 
       // Error text can carry the secret too ("invalid api key sk-…").
-      if (event.status === "error") {
+      if (event.status === 'error') {
         const err = event.error as { message?: string }
-        if (typeof err?.message === "string") {
+        if (typeof err?.message === 'string') {
           const r = redact(err.message, { allow })
           if (r.count) {
             err.message = r.output
@@ -112,7 +227,7 @@ export default Plugin.define({
           if (r.count || referencesSecretVar(event.input) || referencesSecretName(event.input)) {
             const names = secretVarNames(event.input)
             const noteText = names.length
-              ? `\n\n[redactor] Secret-named variable(s) involved: ${names.join(", ")}. Do not print their values - verify they are non-null and use them directly.`
+              ? `\n\n[redactor] Secret-named variable(s) involved: ${names.join(', ')}. Do not print their values - verify they are non-null and use them directly.`
               : NOTE
             err.message = appendNote(err.message, noteText)
           }
@@ -126,19 +241,19 @@ export default Plugin.define({
       let changed = false
       const types = new Set<string>()
 
-      if (typeof result.content === "string") {
+      if (typeof result.content === 'string') {
         const r = redact(result.content, { allow })
         if (r.count) {
           result.content = r.output
           changed = true
-          r.types.forEach((t) => types.add(t))
+          r.types.forEach(t => types.add(t))
         }
       } else if (Array.isArray(result.content)) {
-        const next = result.content.map((part) => {
-          if (part && part.type === "text" && typeof part.text === "string") {
+        const next = result.content.map(part => {
+          if (part && part.type === 'text' && typeof part.text === 'string') {
             const r = redact(part.text, { allow })
             if (r.count) {
-              r.types.forEach((t) => types.add(t))
+              r.types.forEach(t => types.add(t))
               return { ...part, text: r.output }
             }
           }
@@ -150,13 +265,27 @@ export default Plugin.define({
         }
       }
 
-      if (typeof result.output === "string") {
+      if (typeof result.output === 'string') {
         const r = redact(result.output, { allow })
         if (r.count) {
           result.output = r.output
           changed = true
-          r.types.forEach((t) => types.add(t))
+          r.types.forEach(t => types.add(t))
         }
+      }
+
+      // A tool call that reads a secret-bearing file hands over the whole file,
+      // in whatever encoding it asks for. Replace the output entirely — the
+      // value patterns cannot see through base64 or hex.
+      const secretFile = secretFileInInput(event.tool, event.input, cfg)
+      if (secretFile) {
+        const marker = `[REDACTED:secret_file:${secretFile}]`
+        if (typeof result.content === 'string') result.content = marker + NOTE
+        else if (Array.isArray(result.content))
+          result.content = [{ type: 'text', text: marker + NOTE }]
+        if (typeof result.output === 'string') result.output = marker + NOTE
+        report(event.tool, ['secret_file'])
+        return
       }
 
       // Guidance + (when safe) full redaction for secret-named variables.
@@ -169,61 +298,62 @@ export default Plugin.define({
       // but only when the output is short (a printed value) — multi-line output
       // such as `grep` results is preserved and handled by the patterns above.
       const contentText =
-        typeof result.content === "string"
+        typeof result.content === 'string'
           ? result.content
           : Array.isArray(result.content)
             ? (result.content as MutableContentPart[])
-                .map((p) => (p && p.type === "text" && typeof p.text === "string" ? p.text : ""))
-                .join("\n")
-            : ""
-      const outputText = typeof result.output === "string" ? result.output : ""
-      const combined = (contentText + "\n" + outputText).trim()
+                .map(p => (p && p.type === 'text' && typeof p.text === 'string' ? p.text : ''))
+                .join('\n')
+            : ''
+      const outputText = typeof result.output === 'string' ? result.output : ''
+      const combined = (contentText + '\n' + outputText).trim()
       const shortOutput = combined.length > 0 && combined.length <= 300
 
       if (inputRefsSecret && shortOutput) {
         const names = secretVarNames(event.input)
-        const label = names.length ? `env_var_leak:${names.join(",")}` : "env_var_leak"
+        const label = names.length ? `env_var_leak:${names.join(',')}` : 'env_var_leak'
         const marker = `[REDACTED:${label}]`
         const note = names.length
-          ? `\n\n[redactor] Secret-named variable(s) involved: ${names.join(", ")}. Do not print their values - verify they are non-null and use them directly.`
+          ? `\n\n[redactor] Secret-named variable(s) involved: ${names.join(', ')}. Do not print their values - verify they are non-null and use them directly.`
           : NOTE
-        if (typeof result.content === "string") result.content = marker + note
+        if (typeof result.content === 'string') result.content = marker + note
         else if (Array.isArray(result.content)) {
-          result.content = [{ type: "text", text: marker + note }]
+          result.content = [{ type: 'text', text: marker + note }]
         }
-        if (typeof result.output === "string") result.output = marker + note
+        if (typeof result.output === 'string') result.output = marker + note
         changed = true
-        types.add("env_var_leak")
+        types.add('env_var_leak')
         report(event.tool, [...types])
       } else if (changed || triggered) {
         const names = secretVarNames(event.input)
         const noteText = names.length
-          ? `\n\n[redactor] Secret-named variable(s) involved: ${names.join(", ")}. Do not print their values - verify they are non-null and use them directly.`
+          ? `\n\n[redactor] Secret-named variable(s) involved: ${names.join(', ')}. Do not print their values - verify they are non-null and use them directly.`
           : NOTE
-        if (typeof result.content === "string") result.content = appendNote(result.content, noteText)
+        if (typeof result.content === 'string')
+          result.content = appendNote(result.content, noteText)
         else if (Array.isArray(result.content)) {
           const parts = result.content as MutableContentPart[]
           const last = parts.length ? parts[parts.length - 1] : null
-          if (last && last.type === "text" && typeof last.text === "string") {
+          if (last && last.type === 'text' && typeof last.text === 'string') {
             last.text = appendNote(last.text, noteText)
           } else {
-            parts.push({ type: "text", text: noteText.trim() })
+            parts.push({ type: 'text', text: noteText.trim() })
           }
         }
-        if (typeof result.output === "string") result.output = appendNote(result.output, noteText)
+        if (typeof result.output === 'string') result.output = appendNote(result.output, noteText)
         if (changed) report(event.tool, [...types])
-        else report(event.tool, ["env_var_reference"])
+        else report(event.tool, ['env_var_reference'])
       }
     })
 
-    const contextHook = await ctx.session.hook("context", async (event) => {
+    const contextHook = await ctx.session.hook('context', async event => {
       for (const message of event.messages) {
         const parts = message.content as unknown as MutableContentPart[]
         for (const part of parts) {
-          if (part.type !== "tool-result" || !part.result) continue
+          if (part.type !== 'tool-result' || !part.result) continue
           const value = part.result.value
 
-          if (typeof value === "string") {
+          if (typeof value === 'string') {
             const r = redact(value, { allow })
             if (r.count) part.result = { ...part.result, value: appendNote(r.output) }
             continue
@@ -231,9 +361,9 @@ export default Plugin.define({
 
           if (Array.isArray(value)) {
             let touched = false
-            const next = value.map((item) => {
+            const next = value.map(item => {
               const c = item as { type?: string; text?: string }
-              if (c && c.type === "text" && typeof c.text === "string") {
+              if (c && c.type === 'text' && typeof c.text === 'string') {
                 const r = redact(c.text, { allow })
                 if (r.count) {
                   touched = true
